@@ -1,0 +1,47 @@
+// __multiversion__
+// This signals the loading code to prepend either #version 100 or #version 300 es as apropriate.
+
+#if __VERSION__ >= 300
+#define attribute in
+#define varying out
+#else
+#endif
+
+uniform MAT4 WORLDVIEWPROJ;
+uniform vec4 FOG_COLOR;
+uniform vec4 CURRENT_COLOR;
+
+attribute mediump vec4 POSITION;
+attribute vec4 COLOR;
+
+varying vec4 color;
+
+varying vec4 fog;
+varying vec4 current;
+varying vec3 position;
+varying vec3 transpose;
+varying vec4 normalcolor;
+
+attribute vec2 TEXCOORD_0;
+attribute vec2 TEXCOORD_1;
+
+varying vec2 uv1;
+varying vec2 uv0;
+
+const float fogNear = 0.3;
+
+void main(){
+
+gl_Position = WORLDVIEWPROJ * POSITION;
+
+fog = FOG_COLOR;
+current = CURRENT_COLOR;
+position = POSITION.xyz;
+transpose = gl_Position.xyz;
+normalcolor = COLOR;
+
+uv0 = TEXCOORD_0;
+uv1 = TEXCOORD_1;
+
+    color = mix( CURRENT_COLOR, FOG_COLOR, COLOR.r );
+}
