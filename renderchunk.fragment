@@ -1,0 +1,447 @@
+// __multiversion__
+// This signals the loading code to prepend either #version 100 or #version 300 es as apropriate.
+
+// COPYRIGHT CONTINUUM PE SHADERS
+// USE OF ANY CODE IS NOT PERMITTED
+
+// To use centroid sampling we need to have version 300 es shaders, which requires changing:
+// attribute to in
+// varying to out when in vertex shaders or in when in fragment shaders
+// defining an out vec4 FragColor and replacing uses of gl_FragColor with FragColor
+// texture2D to texture
+#if __VERSION__ >= 300
+
+	// version 300 code
+
+	#ifdef MSAA_FRAMEBUFFER_ENABLED
+		#define _centroid centroid
+	#else
+		#define _centroid
+	#endif
+
+	#ifndef BYPASS_PIXEL_SHADER
+		#if defined(TEXEL_AA) && defined(TEXEL_AA_FEATURE)
+			_centroid in highp vec2 uv0;
+			_centroid in highp vec2 uv1;
+		#else
+			_centroid in vec2 uv0;
+			_centroid in vec2 uv1;
+		#endif
+	#endif
+
+	#define varying in
+	#define texture2D texture
+	out vec4 FragColor;
+	#define gl_FragColor FragColor
+#else
+
+	// version 100 code
+
+#ifndef BYPASS_PIXEL_SHADER
+		varying vec2 uv0;
+		varying vec2 uv1;
+#endif
+#endif
+
+#ifdef FOG
+varying vec4 fogColor;
+#endif
+
+#ifdef NEAR_WATER
+varying float cameraDist;
+#endif
+
+#define BIAS_SHADOW_Y 0.8810
+#define BIAS_SHADOW_X 0.663
+
+varying float new_fog;
+varying float flag_waterplane;
+
+varying vec3 screen;
+varying vec4 color;
+
+varying highp vec3 position;
+varying highp vec3 look;
+
+#include "shaders/util.h"
+
+uniform sampler2D TEXTURE_0;
+uniform sampler2D TEXTURE_1;
+uniform sampler2D TEXTURE_2;
+uniform vec2 FOG_CONTROL;
+uniform vec4 FOG_COLOR;
+uniform highp float TIME;
+
+#ifndef BYPASS_PIXEL_SHADER
+highp float random(highp float x){
+	return fract(sin(x) * 428.123);
+}
+
+highp float srandom(highp float x){
+	highp float r1 = random(floor(x));
+	highp float r2 = random(floor(x) + 1.0);
+	return mix(r1, r2, smoothstep(0.0, 1.0, fract(x)));
+}
+
+highp float srandom2d(highp float x, highp float y){
+	highp float r1 = srandom(x + floor(y) * 100.0);
+	highp float r2 = srandom(x + floor(y) * 100.0 + 100.0);
+	return mix(r1, r2, smoothstep(0.0, 1.0, fract(y)));
+}
+
+highp float angle_between_vecs(highp vec3 v1, highp vec3 v2){
+ return acos((v1.x * v2.x + v1.y * v2.y + v1.z * v2.z) / length(v1) / length(v2));
+}
+
+highp vec2 normalmapuv(highp vec3 coords){
+	highp vec2 uv = uv0;
+	highp vec2 pos = fract(position.xz); 
+	return uv - pos / 8.0 + fract(coords.xz / 10.0) / 8.0;
+}
+
+highp vec3 normalfromcolor(highp vec4 color){
+	return vec3(color.r - .5, color.b, color.g - .5);
+}
+
+float colormatch(vec3 color1, vec3 color2, float t){
+	if (length(color1 - color2) < t){
+		return 1.0;
+	}
+	return 0.0;
+}
+
+vec4 skymap(highp vec3 coords, vec4 ambient, vec4 light){
+
+coords /= 10.0;
+highp float cloud_intense = srandom2d(coords.x, coords.z);
+highp float cloud_modifier = srandom2d(coords.x, coords.z + 1000.0);
+
+vec4 clr = vec4(0.2, 0.4, 0.6, 0.0);
+float CM = 0.2*cloud_modifier;
+
+highp vec4 skycolor = vec4(clr.r, clr.g+CM, clr.b, 0.25) + clamp(cloud_intense * 2.0 - 0.5, 0.0, cloud_modifier) * 0.65 * light * vec4(1.0, 1.0, 1.0, 0.8);
+
+return skycolor;
+}
+
+highp vec3 water2layermap(highp vec3 pos){
+highp vec4 normaltex1 = texture2D(TEXTURE_0, normalmapuv(pos + vec3(0.4, 0.0, -.1) * TIME * 0.88));
+highp vec4 normaltex2 = texture2D(TEXTURE_0, normalmapuv(pos + vec3(-.1, 0.0, 0.75) * TIME * 0.88));
+highp vec3 normal = normalize(normalfromcolor(normaltex1) + normalfromcolor(normaltex2) + vec3(0.0, 1.0, 0.0));
+return normal;
+}
+
+vec4 watersurface(vec4 ambient, vec4 light){
+highp vec3 normal;
+highp vec3 pos = position;
+
+normal = water2layermap(pos);
+
+highp vec3 reflected = reflect(look, normal);
+
+vec4 surface = skymap(look + normalize(reflected) * 40.0, ambient, light);
+
+float sunreflect = angle_between_vecs(reflected, vec3(0.0, 1.0, -2.5));
+float nolight = (1.0 - uv1.x);
+
+if(sunreflect < 0.1){
+surface += (vec4(10.0)*nolight)*uv1.y;
+}
+
+return ambient *= surface;
+}
+#endif
+
+// Flow Mapping
+float filmic_curve(float x) {
+float A = 0.22;
+float B = 0.3;
+float C = 0.15 * 1.0;
+float D = 0.4 * 1.77;
+float E = 0.01 * 2.0;
+float F = 0.1;
+return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F; 
+} 
+
+vec3 toneMap(vec3 clr) { 	
+float W = 1.3 / 1.0;
+
+float Luma = dot(clr, vec3(0.0));
+vec3 Chroma = clr - Luma;
+clr = (Chroma * vec3(2.2, 2.3, 2.4)) + Luma;
+clr = vec3(filmic_curve(clr.r), filmic_curve(clr.g), filmic_curve(clr.b)) / filmic_curve(W);
+
+return clr; 
+}
+
+vec3 day = vec3(1.0);
+vec3 night = vec3(0.6,0.73,1.0);
+vec3 sun = vec3(1.0,0.44,0.0);
+
+vec4 moonLight(vec4 light, float null){
+
+float amount = 1.05;
+float colorDesat = dot(light.rgb, vec3(0.25));
+
+light.rgb = mix(light.rgb, vec3(colorDesat) * night, amount * null);
+
+return light;}
+
+vec4 dayLight(vec4 light, float null){
+
+vec4 lum_day = light * vec4(vec3(day), 1.0);
+vec4 final_day = lum_day;
+
+return final_day;}
+
+vec4 sunLight(vec4 light, float null){
+
+float rain = (1.0-pow(FOG_CONTROL.y,5.0));
+light.rgb = mix(light.rgb, light.rgb*max(sun,vec3(1.0)*rain), null);
+
+return light;}
+
+bool getNetherMask(vec4 ambient){
+if(ambient.r > ambient.b && ambient.r < 0.5 && ambient.b < 0.05){
+return true;
+} else {
+return false;}
+}
+
+bool getTheEndMask(vec4 ambient){
+if(ambient.r > ambient.g && ambient.b > ambient.g && ambient.r < 0.05 && ambient.b < 0.05 && ambient.g < 0.05){
+return true;
+} else {
+return false;}
+}
+
+bool getUnWaterMask(vec4 ambient){
+if(ambient.b > ambient.r*2.5 &&  ambient.b*3.0 > ambient.g){
+return true;
+} else {
+return false;}
+}
+
+#ifndef BYPASS_PIXEL_SHADER
+vec3 calc_light(vec3 color){
+float lum = (color.r + color.g + color.b) - uv1.y*3.0;
+vec3 light = (color.rgb) * lum;
+return light.rgb;}
+
+bool getSandMask(vec2 uv){
+vec2 matID = floor(vec2(uv.x * 32.0, uv.y * 32.0));
+if((matID.x>=0.0&&matID.y>=12.0&&
+     matID.x<=3.0&&matID.y<=12.0)||
+    (matID.x>=14.0&&matID.y>=11.0&&
+     matID.x<=19.0&&matID.y<=11.0)||
+    (matID.x>=28.0&&matID.y>=11.0&&
+     matID.x<=30.0&&matID.y<=11.0)){
+return true;
+} else {
+return false;}
+}
+
+bool getSnowMask(vec2 uv){
+vec2 matID = floor(vec2(uv.x * 32.0, uv.y * 32.0));
+if(matID.x==14.0&&matID.y==12.0){
+return true;
+} else {
+return false;}
+}
+
+bool getGrassSideSnowedMask(vec2 uv){
+vec2 matID = floor(vec2(uv.x * 32.0, uv.y * 32.0));
+if(matID.x==26.0&&matID.y==6.0){
+return true;
+} else {
+return false;}
+}
+#endif
+
+void main()
+{
+#ifdef BYPASS_PIXEL_SHADER
+	gl_FragColor = vec4(0, 0, 0, 0);
+	return;
+#else 
+
+#if !defined(TEXEL_AA) || !defined(TEXEL_AA_FEATURE)
+vec4 diffuse = texture2D(TEXTURE_0, uv0, -9.0);
+vec4 uvl = texture2D(TEXTURE_1, vec2(uv1.x*0.5,uv1.y));
+#else
+vec4 diffuse = texture2D_AA(TEXTURE_0, uv0, -9.0);
+#endif
+
+vec4 inColor = color;
+vec4 transf = texture2D(TEXTURE_1, vec2(0.0,1.0));
+float setTime = (transf.r - 0.5) / 0.5;
+setTime = max(0.0, min(1.0, setTime));
+	vec4 bumpTex = vec4(0.0);
+	vec3 blur = vec3(0.73, 0.73, 0.74);
+	
+float nolight = (1.0 - uv1.x);
+float timeNoon = uv1.y * setTime;
+float timeSunset = (0.5-abs(0.5-setTime))*uv1.y;
+float timeMidnight = uv1.y *(1.0-setTime);
+float rain = (1.0-pow(FOG_CONTROL.y,5.0))*uv1.y;
+
+float tNoon = timeNoon*timeNoon;
+float tSunset = timeSunset*timeSunset;
+float tMidnight = timeMidnight*timeMidnight;
+
+float nether = 0.0;
+
+float shadow = 0.0;
+float shdX = color.w;
+float biasY = BIAS_SHADOW_Y;
+float biasX = BIAS_SHADOW_X;
+
+vec3 tl = vec3(0.0, 0.0, 0.0);
+vec3 tlc = vec3(0.6, 0.3, 0.0);
+vec3 AS = vec3(0.0, 0.0, 0.0);
+vec3 ASc = vec3(0.0,0.0,1.0)*0.5;
+
+vec4 fog = FOG_COLOR;
+
+#ifdef SEASONS_FAR
+	diffuse.a = 1.0;
+	inColor.b = 1.0;
+#endif
+
+// Bump mapping
+#ifdef LOW_PRECISION
+    bumpTex += texture2D( TEXTURE_0, uv0 + vec2(0.000035)); //bump pe in texture coord
+    bumpTex -= texture2D( TEXTURE_0, uv0 - vec2(0.000035));  
+    bumpTex += texture2D( TEXTURE_0, uv0 + vec2(0.000065)); //bump pe in texture coord2
+    bumpTex -= texture2D( TEXTURE_0, uv0 - vec2(0.000065));  
+    bumpTex += texture2D( TEXTURE_0, uv0 + vec2(0.000095)); //bump pe in texture coord3
+    bumpTex -= texture2D( TEXTURE_0, uv0 - vec2(0.000095));  
+    bumpTex += texture2D( TEXTURE_0, uv0 + vec2(0.0001)); //bump pe in texture coord3
+    bumpTex -= texture2D( TEXTURE_0, uv0 - vec2(0.0001));  
+    bumpTex += texture2D( TEXTURE_0, uv0 + vec2(0.0002)); //bump pe in texture coord3
+    bumpTex -= texture2D( TEXTURE_0, uv0 - vec2(0.0002));  
+	bumpTex.rgb *= max(bumpTex.rgb, blur);
+    diffuse += diffuse * bumpTex; 
+#endif
+
+#ifdef ALPHA_TEST
+	#ifdef ALPHA_TO_COVERAGE
+		float alphaThreshold = .05;
+	#else
+		float alphaThreshold = .5;
+	#endif
+	if(diffuse.a < alphaThreshold)
+		discard;
+#endif
+
+#if !defined(ALWAYS_LIT)
+	diffuse = diffuse * uvl;
+#endif
+
+ #ifndef SEASONS
+
+#if !defined(ALPHA_TEST) && !defined(BLEND)
+	diffuse.a = inColor.a;
+#elif defined(BLEND)
+	diffuse.a *= inColor.a;
+#endif
+
+   diffuse.rgb *= inColor.rgb;
+#else
+vec2 uv = inColor.xy;
+diffuse.rgb *= mix(vec3(1.0), texture2D(TEXTURE_2, uv).rgb*2.0, inColor.b);
+diffuse.rgb *= inColor.aaa;
+diffuse.a = 1.0;
+#endif
+
+if(getUnWaterMask(fog)){rain = 0.0;}
+float noshd = (1.0-uv1.x*1.5*tMidnight);
+float noshd2 = (1.0-max(0.0,1.0*rain));
+
+#ifdef NEAR_WATER
+diffuse = watersurface(uvl, uvl);
+night.rgb *= 0.5;
+if(getNetherMask(FOG_COLOR)){
+diffuse.rgb = vec3(1.0,0.0,0.0);}
+#endif
+
+if(color.a==0.0){
+diffuse.rgb *= 1.15;
+shdX = color.g*1.4;
+biasY = 0.8751;
+}
+
+if(getSandMask(uv0)){
+shdX *= 0.82;
+}
+
+if(getSnowMask(uv0)){
+shdX *= 0.785;
+}
+
+if(getGrassSideSnowedMask(uv0)){
+shdX *= 0.80;
+}
+
+if(getTheEndMask(fog)){
+tlc.rgb = vec3(0.5,0.0,1.5);
+ASc.rgb = diffuse.rgb * vec3(5.0,0.0,10.0);
+diffuse.rgb *= 0.25;
+}
+
+tl.rgb = calc_light(tlc.rgb*3.0)*pow(uv1.x*0.9,3.0);
+diffuse.rgb += (diffuse.rgb * (tlc.rgb*3.0-1.0) * pow(uv1.x*0.9, 0.5))*tMidnight;
+if((uv1.y<biasY-0.0005)||(shdX<biasX-0.0000))
+{diffuse.rgb += diffuse.rgb * tl;}
+
+if(getNetherMask(fog)){
+nether = 1.0;
+diffuse.rgb *= 0.3 + tl * 0.25;
+}
+
+if(nether==0.0){
+AS.rgb = ASc.rgb;
+}
+
+// Shadow
+if((uv1.y<biasY-0.0005)||(shdX<biasX-0.0000))
+{shadow = 0.05;}
+if((uv1.y<biasY-0.0010)||(shdX<biasX-0.0030))
+{shadow = 0.10;}
+if((uv1.y<biasY-0.0015)||(shdX<biasX-0.0050))
+{shadow = 0.15;}
+if((uv1.y<biasY-0.0020)||(shdX<biasX-0.0080))
+{shadow = 0.20;}
+if((uv1.y<biasY-0.0025)||(shdX<biasX-0.0100))
+{shadow = 0.25;}
+if((uv1.y<biasY-0.0030)||(shdX<biasX-0.0130))
+{shadow = 0.30;}
+if((uv1.y<biasY-0.0035)||(shdX<biasX-0.0150))
+{shadow = 0.35;}
+if((uv1.y<biasY-0.0040)||(shdX<biasX-0.0180))
+{shadow = 0.40;}
+if((uv1.y<biasY-0.0045)||(shdX<biasX-0.0200))
+{shadow = 0.45;}
+if((uv1.y<biasY-0.0050)||(shdX<biasX-0.0230))
+{shadow = 0.50;}
+
+diffuse.rgb = mix(diffuse.rgb,fog.rgb/vec3(2.4),new_fog);
+diffuse.rgb = mix(diffuse.rgb, new_fog*AS, shadow*noshd2*noshd);
+diffuse.rgb = toneMap(diffuse.rgb);
+diffuse.rgb *= 1.0 - max(0.0,max(0.0,length(screen.st))-0.60);
+
+gl_FragColor = sunLight( dayLight( moonLight( diffuse, timeMidnight*nolight), timeNoon), timeSunset);
+
+#ifdef NEAR_WATER 
+vec2 debuguv = look.xz / 8.0 + 0.5;
+if (debuguv.x > 0.0 && debuguv.y > 0.0 && debuguv.x < 1.0 && debuguv.y < 1.0){
+//gl_FragColor = texture2D(TEXTURE_0, debuguv);
+}
+#endif
+
+#ifdef FOG 
+	gl_FragColor.rgb = mix( gl_FragColor.rgb, fogColor.rgb, fogColor.a );
+#endif
+
+#endif // BYPASS_PIXEL_SHADER
+}
