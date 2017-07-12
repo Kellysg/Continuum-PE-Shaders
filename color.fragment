@@ -1,0 +1,87 @@
+// __multiversion__
+// This signals the loading code to prepend either #version 100 or #version 300 es as apropriate.
+
+#if __VERSION__ >= 300
+
+#define varying in
+#define texture2D texture
+out vec4 FragColor;
+#define gl_FragColor FragColor
+#else
+#endif
+
+varying vec4 color;
+
+varying vec4 fog;
+varying vec4 current;
+varying vec3 position;
+varying vec3 transpose;
+varying vec4 normalcolor;
+
+uniform sampler2D TEXTURE_0;
+uniform sampler2D TEXTURE_1;
+uniform sampler2D TEXTURE_2;
+uniform float RENDER_DISTANCE;
+
+varying vec2 uv1;
+varying vec2 uv0;
+
+highp float noise(highp float n){
+return fract(sin(n) * 3782.288);}
+
+highp float noise2d(highp float pos){
+ highp float start = floor(pos);
+ highp float smoothy = smoothstep(0.0, 1.0, fract(pos));
+ return mix(noise(start), noise(start + 1.0), smoothy);}
+
+highp float noise3d(highp float horizont, highp float forward){
+ highp float start = floor(forward);
+ highp float smoothy = smoothstep(0.0, 1.0, fract(forward));
+ return mix(noise2d(horizont + noise(start) * 1000.0), noise2d(horizont + noise(start + 1.0) * 1000.0), smoothy);}
+
+highp float basicWavs(highp vec3 dir){
+vec3 line = dir * 0.1;
+vec3 icloud = dir * 0.5;
+highp float rand1 = noise3d(line.x * 6.0, line.z);
+highp float rand2 = noise3d(dir.x, noise3d( dir.z * 12.0, dir.x/6.0));
+highp float rand3 = noise3d(icloud.x * 3.0, icloud.z);
+
+return (rand1+ rand2) * (rand3 * rand1);}
+
+
+void main()
+{
+#ifdef SKY_PLANE
+
+  float far = length(position.xz * 1.5);
+  float near = 1.0 - far;
+
+  vec4 light = texture2D(TEXTURE_1, vec2(0.0, 1.0));
+
+  float day = light.r;
+  float night = 1.0 - light.r;
+
+  float sky_uv = max(uv1.y, 0.1);
+  float cloud_uv = max(uv1.y, 0.45);
+  
+  float wave = basicWavs(position.xyz * 25.0);
+
+ vec3 sday = vec3(fog.rgb); 
+      sday *= vec3(0.6, 0.8, 1.0);
+      sday = max(sday, vec3(0.3, 0.8, 1.0) * 0.15);
+      sday -= (near * 0.5) * day;
+
+  vec3 cloud = vec3(max(fog.rgb, vec3(0.1, 0.15, 0.2)) );
+
+  vec3 sky = mix(sday, cloud, (1.15 - near) * wave);
+
+  vec4 curr = current;
+       curr.rgb = mix(curr.rgb, sky.rgb, color.a);
+
+  gl_FragColor = mix(curr, fog, normalcolor.r);
+
+#else
+  gl_FragColor = color;
+#endif
+
+}
